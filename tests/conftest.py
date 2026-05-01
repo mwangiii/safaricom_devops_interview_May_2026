@@ -8,25 +8,47 @@ injected via docker-compose environment block or CI service container).
 import os
 import pytest
 
+# Patch environment variables BEFORE importing create_app so that
+# get_database_url() inside __init__.py sees the test values.
+os.environ.setdefault("DB_USER", "test_user")
+os.environ.setdefault("DB_PASSWORD", "test_password")
+os.environ.setdefault("DB_HOST", "localhost")
+os.environ.setdefault("DB_PORT", "5432")
+os.environ.setdefault("DB_NAME", "test_db")
+
+# Allow DATABASE_URL to override the individual vars above.
+if os.environ.get("DATABASE_URL"):
+    from urllib.parse import urlparse
+    _u = urlparse(os.environ["DATABASE_URL"])
+    os.environ["DB_USER"]     = _u.username or os.environ["DB_USER"]
+    os.environ["DB_PASSWORD"] = _u.password or os.environ["DB_PASSWORD"]
+    os.environ["DB_HOST"]     = _u.hostname or os.environ["DB_HOST"]
+    os.environ["DB_PORT"]     = str(_u.port or 5432)
+    os.environ["DB_NAME"]     = _u.path.lstrip("/") or os.environ["DB_NAME"]
+
+os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production")
+
 from app import create_app, db as _db
 from app.models import User, Organisation
 
 
 @pytest.fixture(scope="session")
 def app():
-    """Create application with test configuration."""
-    test_config = {
-        "TESTING": True,
-        "SQLALCHEMY_DATABASE_URI": os.environ.get(
-            "DATABASE_URL",
-            "postgresql://test_user:test_password@localhost:5432/test_db",
-        ),
-        "SQLALCHEMY_TRACK_MODIFICATIONS": False,
-        "JWT_SECRET_KEY": "test-jwt-secret-not-for-production",
-        "SECRET_KEY": "test-secret-key-not-for-production",
-        "JWT_ACCESS_TOKEN_EXPIRES": 3600,   # 1 hour for tests
-    }
-    application = create_app(test_config)
+    """Create application for testing.
+
+    create_app() takes no arguments, so we override the config dict
+    on the returned app object before yielding it.
+    """
+    application = create_app()
+
+    # Override settings that differ in the test environment.
+    application.config.update(
+        TESTING=True,
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        JWT_SECRET_KEY="test-jwt-secret-not-for-production",
+        SECRET_KEY="test-secret-key-not-for-production",
+        JWT_ACCESS_TOKEN_EXPIRES=3600,
+    )
 
     with application.app_context():
         _db.create_all()
