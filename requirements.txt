@@ -1,11 +1,22 @@
+# Web framework
 Flask==2.2.5
+Werkzeug==2.2.3
+
+# Database ORM & migrations
 Flask-SQLAlchemy==3.0.0
+SQLAlchemy==1.4.45
+flask_migrate==3.1.0
+
+# Authentication
 Flask-Bcrypt==0.7.1
 PyJWT==2.3.0
 flask_jwt_extended==4.4.3
-flask_migrate==3.1.0
-SQLAlchemy==1.4.45
+
+# WSGI server (production)
 gunicorn==20.1.0
-Werkzeug==2.2.3
+
+# PostgreSQL driver
 psycopg2-binary==2.9.9
-prometheus_flask_exporter>=0.20.0
+
+# Observability — pinned (was >=0.20.0, caused safety scan warning)
+prometheus_flask_exporter==0.23.2
