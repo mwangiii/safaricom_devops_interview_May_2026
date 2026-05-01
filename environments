@@ -1,0 +1,5 @@
+DB_HOST=db
+DB_PORT=5432
+DB_NAME=Safaricom
+DB_USER=postgres
+DB_PASSWORD=Password1
