@@ -1,0 +1,79 @@
+# =========================
+# Environment & secrets
+# =========================
+.env
+*.env
+database.ini
+*.pem
+*.key
+*.crt
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+dist/
+build/
+*.egg-info/
+
+# =========================
+# Flask / app runtime
+# =========================
+instance/
+*.sqlite3
+
+# =========================
+# Docker
+# =========================
+docker-compose.override.yml
+*.log
+
+# =========================
+# Terraform
+# =========================
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Keep lock file (important for CI consistency)
+# DO NOT IGNORE:
+# .terraform.lock.hcl
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# CI/CD artifacts
+# =========================
+*.tar
+*.zip

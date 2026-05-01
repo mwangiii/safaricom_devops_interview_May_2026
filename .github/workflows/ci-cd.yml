@@ -1,0 +1,327 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI/CD Pipeline — Safaricom Auth API
+#
+# Stages:
+#   1. lint-test     → Runs on every PR and push to main
+#   2. build-push    → Builds Docker image, tags with commit SHA, pushes to
+#                      Docker Hub (or ECR — see comments)
+#   3. deploy-staging → Auto-deploys to staging after successful build
+#   4. approve-prod  → Manual approval gate (environment protection rule)
+#   5. deploy-prod   → Deploys to production after approval
+#   6. rollback      → Re-deploys the previous stable tag on manual trigger
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  # Allow manual trigger of rollback workflow
+  workflow_dispatch:
+    inputs:
+      rollback_tag:
+        description: "Image tag to roll back to (e.g. sha-abc1234)"
+        required: false
+        default: ""
+
+env:
+  # ── Docker Hub ─────────────────────────────────────────────────────────
+  REGISTRY:    docker.io
+  IMAGE_NAME:  ${{ secrets.DOCKERHUB_USERNAME }}/safaricom-auth-api
+
+  # ── ECR (alternative — uncomment and replace Docker Hub refs below) ────
+  # REGISTRY:    ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+  # IMAGE_NAME:  safaricom-auth-api
+
+  PYTHON_VERSION: "3.11"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. Lint + Unit Tests ────────────────────────────────────────────────────
+  lint-test:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+    # Run on PRs and direct pushes to main/develop
+    if: github.event_name != 'workflow_dispatch'
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB:       test_db
+          POSTGRES_USER:     test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flake8 pytest pytest-cov bandit safety
+
+      # Static analysis
+      - name: Lint with flake8
+        run: |
+          flake8 app/ config.py run.py \
+            --max-line-length=120 \
+            --ignore=E501,W503 \
+            --exclude=__pycache__,.git
+
+      # Dependency vulnerability scan
+      - name: Security scan (safety)
+        run: safety check -r requirements.txt
+        continue-on-error: false
+
+      # SAST
+      - name: SAST scan (bandit)
+        run: bandit -r app/ -ll -x tests/
+        continue-on-error: false
+
+      # Unit + E2E tests
+      - name: Run tests with coverage
+        env:
+          FLASK_ENV:      testing
+          DATABASE_URL:   postgresql://test_user:test_password@localhost:5432/test_db
+          SECRET_KEY:     ci-secret-key-not-for-production
+          JWT_SECRET_KEY: ci-jwt-secret-not-for-production
+        run: |
+          pytest tests/ \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v
+
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          fail_ci_if_error: false
+
+  # ── 2. Build & Push Docker Image ────────────────────────────────────────────
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: lint-test
+    # Only build on pushes to main/develop — not PRs
+    if: github.event_name == 'push'
+
+    outputs:
+      image_tag:   ${{ steps.meta.outputs.tags }}
+      sha_tag:     ${{ steps.sha.outputs.tag }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA tag
+        id: sha
+        run: echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Docker Hub login ──────────────────────────────────────────────────
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ── ECR login (alternative) ───────────────────────────────────────────
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     aws-region:            ${{ secrets.AWS_REGION }}
+      #
+      # - name: Log in to Amazon ECR
+      #   uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+      # Save the SHA tag for downstream jobs
+      - name: Export image tag artifact
+        run: echo "${{ steps.sha.outputs.tag }}" > image_tag.txt
+
+      - name: Upload image tag artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tag
+          path: image_tag.txt
+
+  # ── 3. Deploy to Staging ─────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.auth.safaricom.example.com
+
+    steps:
+      - name: Download image tag artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tag
+
+      - name: Read image tag
+        id: tag
+        run: echo "value=$(cat image_tag.txt)" >> "$GITHUB_OUTPUT"
+
+      # ── Simulated deployment — replace with real deploy command ─────────────
+      # e.g.: aws ecs update-service, kubectl set image, ansible-playbook, etc.
+      - name: Deploy to staging (simulated)
+        run: |
+          echo "Deploying ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} to STAGING"
+          # Example ECS deploy (uncomment and configure for real infra):
+          # aws ecs update-service \
+          #   --cluster safaricom-staging \
+          #   --service auth-api \
+          #   --force-new-deployment \
+          #   --region ${{ secrets.AWS_REGION }}
+
+      - name: Run smoke tests against staging
+        run: |
+          echo "Running smoke tests against https://staging.auth.safaricom.example.com"
+          # curl -f https://staging.auth.safaricom.example.com/health
+
+  # ── 4. Manual Approval Gate ──────────────────────────────────────────────────
+  #
+  # This job does nothing itself — it exists to enforce a GitHub Environment
+  # protection rule. Go to Settings → Environments → production and add
+  # "Required reviewers" to prevent automatic promotion.
+  #
+  approve-prod:
+    name: Approve Production Deploy
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production-approval   # Configure this env with required reviewer(s)
+
+    steps:
+      - name: Approval granted
+        run: echo "Production deployment approved by ${{ github.actor }}"
+
+  # ── 5. Deploy to Production ──────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: approve-prod
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://auth.safaricom.example.com
+
+    steps:
+      - name: Download image tag artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tag
+
+      - name: Read image tag
+        id: tag
+        run: echo "value=$(cat image_tag.txt)" >> "$GITHUB_OUTPUT"
+
+      # Persist stable tag for rollback reference
+      - name: Store stable tag in GitHub env
+        run: echo "STABLE_TAG=${{ steps.tag.outputs.value }}" >> "$GITHUB_ENV"
+
+      - name: Deploy to production (simulated)
+        run: |
+          echo "Deploying ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} to PRODUCTION"
+          # aws ecs update-service \
+          #   --cluster safaricom-prod \
+          #   --service auth-api \
+          #   --force-new-deployment \
+          #   --region ${{ secrets.AWS_REGION }}
+
+      - name: Tag stable release in registry
+        run: |
+          echo "Tagging image as stable: ${{ env.IMAGE_NAME }}:stable"
+          # docker pull  ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
+          # docker tag   ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} ${{ env.IMAGE_NAME }}:stable
+          # docker push  ${{ env.IMAGE_NAME }}:stable
+
+  # ── 6. Rollback ──────────────────────────────────────────────────────────────
+  #
+  # Triggered manually via workflow_dispatch with a rollback_tag input.
+  # Defaults to the :stable tag if no specific tag is supplied.
+  #
+  rollback:
+    name: Rollback Production
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+
+    steps:
+      - name: Determine rollback tag
+        id: rollback
+        run: |
+          TAG="${{ github.event.inputs.rollback_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="stable"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Rolling back to: ${{ env.IMAGE_NAME }}:$TAG"
+
+      - name: Execute rollback (simulated)
+        run: |
+          echo "Re-deploying ${{ env.IMAGE_NAME }}:${{ steps.rollback.outputs.tag }} to PRODUCTION"
+          # aws ecs update-service \
+          #   --cluster safaricom-prod \
+          #   --service auth-api \
+          #   --force-new-deployment \
+          #   --region ${{ secrets.AWS_REGION }}
+
+      - name: Notify on rollback
+        run: |
+          echo "ROLLBACK EXECUTED by ${{ github.actor }} to tag ${{ steps.rollback.outputs.tag }}"
+          # Add Slack / PagerDuty notification here
