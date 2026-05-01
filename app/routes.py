@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import jsonify, request
 from app import db
 import jwt
 from app.models import User
@@ -7,7 +7,6 @@ from app.models import UserOrganisation
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
-import os
 import uuid
 
 
@@ -36,7 +35,7 @@ def register_routes(app):
               <li><strong>POST</strong> <code>/auth/register</code> - Register a new user and create default organisation</li>
               <li><strong>POST</strong> <code>/auth/login</code> - Log in and receive JWT token</li>
               <li><strong>GET</strong> <code>/api/users/&lt;userId&gt;</code> - Retrieve user profile</li>
-              <li><strong>GET</strong> <code>/api/organisations</code> - List user’s organisations <em>(JWT required)</em></li>
+              <li><strong>GET</strong> <code>/api/organisations</code> - List user's organisations <em>(JWT required)</em></li>
               <li><strong>GET</strong> <code>/api/organisations/&lt;orgId&gt;</code> - Get organisation details <em>(JWT required)</em></li>
               <li><strong>POST</strong> <code>/api/organisations</code> - Create new organisation <em>(JWT required)</em></li>
               <li><strong>POST</strong> <code>/api/organisations/&lt;orgId&gt;/users</code> - Add user to organisation</li>
@@ -47,7 +46,6 @@ def register_routes(app):
         </html>
         """
 
-    # Function to add errors to a list
     def add_error_to_list(errors_list, field, message):
         errors_list.append({
             "field": field,
@@ -58,12 +56,12 @@ def register_routes(app):
         try:
             payload = {
                 'exp': datetime.utcnow() + timedelta(hours=1),
-                'iat': datetime.utcnow(), 
+                'iat': datetime.utcnow(),
                 'sub': str(user_id)
             }
-            jwt_token = jwt.encode(payload, JWT_SECRET_KEY, algorithm='HS256')
+            jwt_token = jwt.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
             return jwt_token
-        except Exception as e:
+        except Exception:
             return "Cannot generate session token"
 
     @app.route("/auth/register", methods=['POST'])
@@ -79,7 +77,7 @@ def register_routes(app):
             add_error_to_list(errors_list, field="email", message="Email is required")
         if not data.get('password'):
             add_error_to_list(errors_list, field="password", message="Password is required")
-        
+
         if User.query.filter_by(email=data['email']).first():
             add_error_to_list(errors_list, field="email", message="Email Address already in use")
 
@@ -138,7 +136,7 @@ def register_routes(app):
                         "phone": new_user.phone,
                     }
                 }
-            }), 201 
+            }), 201
         except Exception as e:
             db.session.rollback()
             return jsonify({
@@ -210,7 +208,9 @@ def register_routes(app):
         userid = get_jwt_identity()
 
         try:
-            user_organizations = db.session.query(Organisation).join(UserOrganisation).filter(UserOrganisation.userid == userid).all()
+            user_organizations = db.session.query(Organisation).join(UserOrganisation).filter(
+                UserOrganisation.userid == userid
+            ).all()
             print(user_organizations)
 
             organizations = [{
@@ -238,7 +238,6 @@ def register_routes(app):
     @app.route("/api/organisations/<orgId>", methods=['GET'])
     @jwt_required()
     def get_organization_by_id(orgId):
-        userid = get_jwt_identity()
         try:
             organization = Organisation.query.get(orgId)
 
@@ -288,7 +287,7 @@ def register_routes(app):
                 "status": "success",
                 "message": "Organization created successfully",
                 "data": {
-                    "orgId": new_organization.orgid,  
+                    "orgId": new_organization.orgid,
                     "name": new_organization.name,
                     "description": new_organization.description if new_organization.description else ""
                 }
