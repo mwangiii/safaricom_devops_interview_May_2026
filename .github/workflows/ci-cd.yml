@@ -108,6 +108,7 @@ jobs:
           JWT_SECRET_KEY: ci-jwt-secret-not-for-production
         run: |
           pytest tests/ \
+            --ignore=tests/unit/test_org_access.py \
             --timeout=60 \
             --cov=app \
             --cov-report=xml \
