@@ -2,13 +2,13 @@
 # CI/CD Pipeline — Safaricom Auth API
 #
 # Stages:
-#   1. lint-test     → Runs on every PR and push to main
-#   2. build-push    → Builds Docker image, tags with commit SHA, pushes to
-#                      Docker Hub (or ECR — see comments)
+#   1. lint-test      → Runs on every PR and push to main
+#   2. build-push     → Builds Docker image, tags with commit SHA, pushes to
+#                       Docker Hub (or ECR — see comments)
 #   3. deploy-staging → Auto-deploys to staging after successful build
-#   4. approve-prod  → Manual approval gate (environment protection rule)
-#   5. deploy-prod   → Deploys to production after approval
-#   6. rollback      → Re-deploys the previous stable tag on manual trigger
+#   4. approve-prod   → Manual approval gate (environment protection rule)
+#   5. deploy-prod    → Deploys to production after approval
+#   6. rollback       → Re-deploys the previous stable tag on manual trigger
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI/CD Pipeline
@@ -27,7 +27,7 @@ on:
         default: ""
 
 env:
-  # ── Docker Hub ──────────────────────────────────────────────────      ───────
+  # ── Docker Hub ─────────────────────────────────────────────────────────
   REGISTRY:    docker.io
   IMAGE_NAME:  ${{ secrets.DOCKERHUB_USERNAME }}/safaricom-auth-api
 
@@ -76,7 +76,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install flake8 pytest pytest-cov bandit safety
+          pip install flake8 pytest pytest-cov bandit safety pytest-timeout
 
       # Static analysis
       - name: Lint with flake8
@@ -97,6 +97,9 @@ jobs:
         continue-on-error: false
 
       # Unit + E2E tests
+      # FIX: added pytest-timeout install above and --timeout=60 below.
+      # This kills any test or teardown (including clean_db) that hangs
+      # longer than 60 seconds instead of blocking the runner indefinitely.
       - name: Run tests with coverage
         env:
           FLASK_ENV:      testing
@@ -105,6 +108,7 @@ jobs:
           JWT_SECRET_KEY: ci-jwt-secret-not-for-production
         run: |
           pytest tests/ \
+            --timeout=60 \
             --cov=app \
             --cov-report=xml \
             --cov-report=term-missing \
@@ -184,7 +188,6 @@ jobs:
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
             VCS_REF=${{ github.sha }}
 
-      # Save the SHA tag for downstream jobs
       - name: Export image tag artifact
         run: echo "${{ steps.sha.outputs.tag }}" > image_tag.txt
 
@@ -214,12 +217,9 @@ jobs:
         id: tag
         run: echo "value=$(cat image_tag.txt)" >> "$GITHUB_OUTPUT"
 
-      # ── Simulated deployment — replace with real deploy command ─────────────
-      # e.g.: aws ecs update-service, kubectl set image, ansible-playbook, etc.
       - name: Deploy to staging (simulated)
         run: |
           echo "Deploying ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} to STAGING"
-          # Example ECS deploy (uncomment and configure for real infra):
           # aws ecs update-service \
           #   --cluster safaricom-staging \
           #   --service auth-api \
@@ -243,7 +243,7 @@ jobs:
     needs: deploy-staging
     if: github.ref == 'refs/heads/main'
     environment:
-      name: production-approval   # Configure this env with required reviewer(s)
+      name: production-approval
 
     steps:
       - name: Approval granted
@@ -269,7 +269,6 @@ jobs:
         id: tag
         run: echo "value=$(cat image_tag.txt)" >> "$GITHUB_OUTPUT"
 
-      # Persist stable tag for rollback reference
       - name: Store stable tag in GitHub env
         run: echo "STABLE_TAG=${{ steps.tag.outputs.value }}" >> "$GITHUB_ENV"
 

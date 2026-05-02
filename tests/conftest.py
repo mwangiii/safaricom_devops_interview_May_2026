@@ -10,6 +10,7 @@ Key performance fixes vs original:
 import sys, os
 import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # ── Environment defaults (resolved before the app is imported) ───────────────
 os.environ.setdefault("DB_USER",     "test_user")
 os.environ.setdefault("DB_PASSWORD", "test_password")
@@ -31,6 +32,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production")
 from app import create_app, db as _db  # noqa: E402  (must come after env setup)
 from app.models import User            # noqa: E402
 
+
 # ── Application (one per test session) ──────────────────────────────────────
 @pytest.fixture(scope="session")
 def app():
@@ -47,17 +49,19 @@ def app():
         yield application
         _db.drop_all()
 
+
 # ── Single test client reused across the whole session ───────────────────────
 @pytest.fixture(scope="session")
 def client(app):
     return app.test_client()
 
+
 # ── Per-test DB cleanup ──────────────────────────────────────────────────────
 #
-# FIX: was "organisation_members" which does not exist in the schema.
-# The actual join table is "userorganisation" (from UserOrganisation model).
-# The wrong name caused a silent exception + session lock that made the
-# test suite hang indefinitely.
+# Tables cleared in reverse FK order to avoid constraint violations.
+# FIX 1: was "organisation_members" — correct name is "userorganisation".
+# FIX 2: statement_timeout kills any hanging DELETE after 5 seconds
+#         instead of locking the runner indefinitely.
 #
 _TABLES_TO_CLEAN = [
     "userorganisation",   # FK join table — must come before its parents
@@ -68,20 +72,26 @@ _TABLES_TO_CLEAN = [
 @pytest.fixture(scope="function", autouse=True)
 def clean_db(app):
     """Wipe test data after every test function."""
-    yield  # let the test run first
+    yield
     with app.app_context():
-        for table in _TABLES_TO_CLEAN:
-            try:
-                _db.session.execute(_db.text(f"DELETE FROM {table}"))
-            except Exception:
-                _db.session.rollback()
-        _db.session.commit()
+        try:
+            _db.session.execute(_db.text("SET LOCAL statement_timeout = '5000'"))
+            for table in _TABLES_TO_CLEAN:
+                try:
+                    _db.session.execute(_db.text(f"DELETE FROM {table}"))
+                except Exception:
+                    _db.session.rollback()
+            _db.session.commit()
+        except Exception:
+            _db.session.remove()
+
 
 # ── Legacy per-test DB session ───────────────────────────────────────────────
 @pytest.fixture(scope="function")
 def db(app):
     with app.app_context():
         yield _db.session
+
 
 # ── Reusable sample user ─────────────────────────────────────────────────────
 @pytest.fixture(scope="function")
@@ -112,6 +122,7 @@ def sample_user(client):
         )
 
     return _User()
+
 
 # ── Convenience: pre-built Authorization header for sample_user ─────────────
 @pytest.fixture(scope="function")
