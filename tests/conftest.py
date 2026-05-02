@@ -9,8 +9,7 @@ Key performance fixes vs original:
 """
 import sys, os
 import pytest
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ── Environment defaults (resolved before the app is imported) ───────────────
 os.environ.setdefault("DB_USER",     "test_user")
 os.environ.setdefault("DB_PASSWORD", "test_password")
