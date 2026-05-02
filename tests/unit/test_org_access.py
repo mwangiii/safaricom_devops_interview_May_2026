@@ -20,8 +20,9 @@ class TestOrganisationAccessControl:
     def two_users_with_orgs(self, client, app):
         """
         Register two independent users via the real API.
-        The app does not return organisations in the register response,
-        so we fetch them from /api/organisations after login.
+        Uses yield so teardown runs after each test — disposes the
+        SQLAlchemy engine to release all pooled connections before
+        clean_db runs its DELETEs.
         """
         # ── User A ────────────────────────────────────────────────────────
         resp_a = client.post(REGISTER, json={
@@ -64,9 +65,7 @@ class TestOrganisationAccessControl:
             "token_b": token_b, "org_b_id": org_b_id,
         }
 
-        # Force-close all pooled DB connections after each test that uses
-        # this fixture. Without this, SQLAlchemy holds open connections that
-        # block the clean_db DELETE statements, causing the suite to hang.
+        # Release all SQLAlchemy pooled connections so clean_db can DELETE
         with app.app_context():
             from app import db as _db
             _db.session.remove()
@@ -106,4 +105,4 @@ class TestOrganisationAccessControl:
         resp = client.get(
             f"/api/organisations/{two_users_with_orgs['org_a_id']}"
         )
-        assert resp.status_code == 401 
+        assert resp.status_code == 401

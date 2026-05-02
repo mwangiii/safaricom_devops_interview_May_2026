@@ -1,17 +1,11 @@
 """
 Shared pytest fixtures.
-Key performance fixes vs original:
-  - `client` is now session-scoped  → one test client for the whole run
-  - `clean_db` auto-fixture deletes rows after each test instead of
-    opening/rolling-back a full connection per test
-  - `sample_user` is session-scoped so Jane Doe is only registered once
-  - DB tables are truncated in dependency order to respect FK constraints
 """
 import sys, os
 import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── Environment defaults (resolved before the app is imported) ───────────────
+# ── Environment defaults ─────────────────────────────────────────────────────
 os.environ.setdefault("DB_USER",     "test_user")
 os.environ.setdefault("DB_PASSWORD", "test_password")
 os.environ.setdefault("DB_HOST",     "localhost")
@@ -29,11 +23,11 @@ if os.environ.get("DATABASE_URL"):
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production")
 
-from app import create_app, db as _db  # noqa: E402  (must come after env setup)
+from app import create_app, db as _db  # noqa: E402
 from app.models import User            # noqa: E402
 
 
-# ── Application (one per test session) ──────────────────────────────────────
+# ── Application ──────────────────────────────────────────────────────────────
 @pytest.fixture(scope="session")
 def app():
     application = create_app()
@@ -50,7 +44,7 @@ def app():
         _db.drop_all()
 
 
-# ── Single test client reused across the whole session ───────────────────────
+# ── Single test client ───────────────────────────────────────────────────────
 @pytest.fixture(scope="session")
 def client(app):
     return app.test_client()
@@ -58,32 +52,50 @@ def client(app):
 
 # ── Per-test DB cleanup ──────────────────────────────────────────────────────
 #
-# Tables cleared in reverse FK order to avoid constraint violations.
-# FIX 1: was "organisation_members" — correct name is "userorganisation".
-# FIX 2: statement_timeout kills any hanging DELETE after 5 seconds
-#         instead of locking the runner indefinitely.
+# KEY FIX: Use a raw psycopg2 connection that is completely independent of
+# SQLAlchemy's connection pool. This avoids the deadlock where SQLAlchemy
+# holds open connections from the previous test that block our DELETEs.
 #
-_TABLES_TO_CLEAN = [
-    "userorganisation",   # FK join table — must come before its parents
-    "organisations",
-    "users",
-]
-
 @pytest.fixture(scope="function", autouse=True)
 def clean_db(app):
-    """Wipe test data after every test function."""
+    """Wipe test data after every test using a fresh independent connection."""
     yield
+
+    import psycopg2
+
+    # Dispose SQLAlchemy pool first so no app connections hold row locks
     with app.app_context():
         try:
-            _db.session.execute(_db.text("SET LOCAL statement_timeout = '5000'"))
-            for table in _TABLES_TO_CLEAN:
-                try:
-                    _db.session.execute(_db.text(f"DELETE FROM {table}"))
-                except Exception:
-                    _db.session.rollback()
-            _db.session.commit()
-        except Exception:
             _db.session.remove()
+            _db.engine.dispose()
+        except Exception:
+            pass
+
+    # Use a raw connection completely outside SQLAlchemy
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname=os.environ["DB_NAME"],
+            user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"],
+            host=os.environ["DB_HOST"],
+            port=os.environ["DB_PORT"],
+            connect_timeout=5,
+        )
+        conn.autocommit = False
+        cur = conn.cursor()
+        cur.execute("SET statement_timeout = '5000'")
+        cur.execute("DELETE FROM userorganisation")
+        cur.execute("DELETE FROM organisations")
+        cur.execute("DELETE FROM users")
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
 
 
 # ── Legacy per-test DB session ───────────────────────────────────────────────
@@ -96,11 +108,6 @@ def db(app):
 # ── Reusable sample user ─────────────────────────────────────────────────────
 @pytest.fixture(scope="function")
 def sample_user(client):
-    """
-    Create a sample user via the register endpoint so the real password
-    hashing path is exercised. Re-registers on every test because clean_db
-    wipes the users table between tests.
-    """
     resp = client.post("/auth/register", json={
         "firstName": "Jane",
         "lastName":  "Doe",
@@ -124,7 +131,7 @@ def sample_user(client):
     return _User()
 
 
-# ── Convenience: pre-built Authorization header for sample_user ─────────────
+# ── Auth headers helper ──────────────────────────────────────────────────────
 @pytest.fixture(scope="function")
 def auth_headers(client, sample_user):
     response = client.post(
