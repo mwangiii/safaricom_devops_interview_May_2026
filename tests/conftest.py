@@ -1,8 +1,16 @@
 """
 Shared pytest fixtures.
+
+Key design decisions:
+- clean_db uses TRANSACTION ROLLBACK (not psycopg2 DELETEs) to avoid deadlocks
+  between SQLAlchemy's connection pool and raw DB connections.
+- Session-scoped app/client so the Flask app is only created once per run.
+- Function-scoped db/sample_user/auth_headers so every test starts clean.
 """
-import sys, os
+import sys
+import os
 import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── Environment defaults ─────────────────────────────────────────────────────
@@ -24,7 +32,6 @@ if os.environ.get("DATABASE_URL"):
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production")
 
 from app import create_app, db as _db  # noqa: E402
-from app.models import User            # noqa: E402
 
 
 # ── Application ──────────────────────────────────────────────────────────────
@@ -50,55 +57,43 @@ def client(app):
     return app.test_client()
 
 
-# ── Per-test DB cleanup ──────────────────────────────────────────────────────
+# ── Per-test DB cleanup (TRANSACTION ROLLBACK — no psycopg2 deadlocks) ──────
 #
-# KEY FIX: Use a raw psycopg2 connection that is completely independent of
-# SQLAlchemy's connection pool. This avoids the deadlock where SQLAlchemy
-# holds open connections from the previous test that block our DELETEs.
+# Strategy: wrap every test in a savepoint. After the test body runs, roll
+# back to that savepoint. This is O(1) and never blocks on row locks because
+# no other connection is involved — it's a single SQLAlchemy session undoing
+# its own work.
+#
+# Why this beats the old psycopg2 DELETE approach:
+#   - The old approach opened a *second* connection and issued DELETEs while
+#     SQLAlchemy's pool still held open connections from the test. Those open
+#     connections held row locks → psycopg2 DELETEs blocked → 80-minute hang.
+#   - Rollback needs no second connection and releases locks instantly.
 #
 @pytest.fixture(scope="function", autouse=True)
 def clean_db(app):
-    """Wipe test data after every test using a fresh independent connection."""
-    yield
-
-    import psycopg2
-
-    # Dispose SQLAlchemy pool first so no app connections hold row locks
+    """Roll back all DB changes after each test — zero deadlock risk."""
     with app.app_context():
-        try:
-            _db.session.remove()
-            _db.engine.dispose()
-        except Exception:
-            pass
+        # Grab a connection from the pool and start a transaction
+        connection = _db.engine.connect()
+        transaction = connection.begin()
 
-    # Use a raw connection completely outside SQLAlchemy
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            dbname=os.environ["DB_NAME"],
-            user=os.environ["DB_USER"],
-            password=os.environ["DB_PASSWORD"],
-            host=os.environ["DB_HOST"],
-            port=os.environ["DB_PORT"],
-            connect_timeout=5,
-        )
-        conn.autocommit = False
-        cur = conn.cursor()
-        cur.execute("SET statement_timeout = '5000'")
-        cur.execute("DELETE FROM userorganisation")
-        cur.execute("DELETE FROM organisations")
-        cur.execute("DELETE FROM users")
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+        # Bind the session to this connection so every ORM call
+        # participates in our transaction
+        _db.session.bind = connection
+
+        yield
+
+        # Teardown: undo everything the test did
+        _db.session.remove()
+        transaction.rollback()
+        connection.close()
+
+        # Restore the session to normal pool-based binding
+        _db.session.bind = None
 
 
-# ── Legacy per-test DB session ───────────────────────────────────────────────
+# ── Per-test DB session (for tests that need direct ORM access) ──────────────
 @pytest.fixture(scope="function")
 def db(app):
     with app.app_context():
