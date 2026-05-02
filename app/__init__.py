@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
@@ -43,6 +43,23 @@ def create_app():
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
+
+    # ---------------- JWT ERROR HANDLERS ----------------
+    @jwt.unauthorized_loader
+    def missing_token_callback(err):
+        return jsonify({"message": "Missing token"}), 401
+
+    @jwt.invalid_token_loader
+    def invalid_token_callback(err):
+        return jsonify({"message": "Invalid token"}), 401
+
+    @jwt.expired_token_loader
+    def expired_token_callback(jwt_header, jwt_payload):
+        return jsonify({"message": "Token expired"}), 401
+
+    @jwt.revoked_token_loader
+    def revoked_token_callback(jwt_header, jwt_payload):
+        return jsonify({"message": "Token revoked"}), 401
 
     # ---------------- ROUTES ----------------
     from app.routes import register_routes
