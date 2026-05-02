@@ -1,6 +1,5 @@
 """
 Shared pytest fixtures.
-
 Key performance fixes vs original:
   - `client` is now session-scoped  → one test client for the whole run
   - `clean_db` auto-fixture deletes rows after each test instead of
@@ -8,7 +7,6 @@ Key performance fixes vs original:
   - `sample_user` is session-scoped so Jane Doe is only registered once
   - DB tables are truncated in dependency order to respect FK constraints
 """
-
 import os
 import pytest
 
@@ -33,7 +31,6 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-not-for-production")
 from app import create_app, db as _db  # noqa: E402  (must come after env setup)
 from app.models import User            # noqa: E402
 
-
 # ── Application (one per test session) ──────────────────────────────────────
 @pytest.fixture(scope="session")
 def app():
@@ -50,28 +47,20 @@ def app():
         yield application
         _db.drop_all()
 
-
 # ── Single test client reused across the whole session ───────────────────────
-#
-# Previously `scope="function"` meant Flask created and tore down a new
-# client for every test — a significant overhead.  Session scope keeps one
-# client alive for the entire run; state isolation is handled by `clean_db`.
-#
 @pytest.fixture(scope="session")
 def client(app):
     return app.test_client()
 
-
-# ── Per-test DB cleanup (replaces the per-test connection/rollback pattern) ──
+# ── Per-test DB cleanup ──────────────────────────────────────────────────────
 #
-# Deleting rows is far cheaper than opening a connection, beginning a
-# transaction, and rolling it back for every test.  Tables are cleared in
-# reverse FK order so no constraint violations occur.
-#
-# Add any additional tables your app uses to the list below.
+# FIX: was "organisation_members" which does not exist in the schema.
+# The actual join table is "userorganisation" (from UserOrganisation model).
+# The wrong name caused a silent exception + session lock that made the
+# test suite hang indefinitely.
 #
 _TABLES_TO_CLEAN = [
-    "organisation_members",   # join table first (if it exists)
+    "userorganisation",   # FK join table — must come before its parents
     "organisations",
     "users",
 ]
@@ -85,40 +74,22 @@ def clean_db(app):
             try:
                 _db.session.execute(_db.text(f"DELETE FROM {table}"))
             except Exception:
-                # Table may not exist in all schema versions — skip silently
                 _db.session.rollback()
         _db.session.commit()
 
-
-# ── Legacy per-test DB session (kept for tests that inject `db` directly) ───
-#
-# Now simply yields the shared session; isolation is guaranteed by `clean_db`.
-#
+# ── Legacy per-test DB session ───────────────────────────────────────────────
 @pytest.fixture(scope="function")
 def db(app):
     with app.app_context():
         yield _db.session
 
-
-# ── Reusable sample user (registered once per session) ──────────────────────
-#
-# Previously `scope="function"` re-registered Jane Doe before every test
-# that used `sample_user`, adding a real HTTP + DB round-trip each time.
-# Session scope registers her exactly once.
-#
-# NOTE: because `clean_db` wipes users after every test, `sample_user` must
-# re-register if the table was wiped.  The fixture detects this and
-# re-registers as needed without raising on 400 (already exists).
-#
+# ── Reusable sample user ─────────────────────────────────────────────────────
 @pytest.fixture(scope="function")
 def sample_user(client):
     """
     Create a sample user via the register endpoint so the real password
-    hashing path is exercised — no manual set_password() needed.
-
-    Re-registers on every test because `clean_db` wipes the users table
-    between tests.  A 400 response (duplicate email within the same test)
-    is treated as "already exists" and is not an error.
+    hashing path is exercised. Re-registers on every test because clean_db
+    wipes the users table between tests.
     """
     resp = client.post("/auth/register", json={
         "firstName": "Jane",
@@ -141,7 +112,6 @@ def sample_user(client):
         )
 
     return _User()
-
 
 # ── Convenience: pre-built Authorization header for sample_user ─────────────
 @pytest.fixture(scope="function")
