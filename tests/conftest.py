@@ -7,8 +7,9 @@ Key performance fixes vs original:
   - `sample_user` is session-scoped so Jane Doe is only registered once
   - DB tables are truncated in dependency order to respect FK constraints
 """
-import os
+import sys, os
 import pytest
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ── Environment defaults (resolved before the app is imported) ───────────────
 os.environ.setdefault("DB_USER",     "test_user")
